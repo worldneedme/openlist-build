@@ -65,6 +65,25 @@ jobs:
             exit 1
           }
 
+      - name: Run unit tests
+        run: |
+          set -o pipefail
+          gradle testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee /tmp/test.log || {
+            echo "::error title=TestFailed::gradle testDebugUnitTest failed"
+            grep -E "(error:|FAILURE:|FAILED|AssertionError|Exception|expected:|but was:)" /tmp/test.log | head -n 40 | while IFS= read -r line; do
+              echo "::error title=TestError::$line"
+            done
+            exit 1
+          }
+
+      - name: Upload unit test report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: unit-test-report
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         if: always()
