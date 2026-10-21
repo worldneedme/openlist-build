@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Private source branch, tag or commit to build
+        description: 'Private source ref: master (stable) or dev (testing)'
         required: true
-        default: fix/android-native-interactions
+        default: master
         type: string
 
 permissions:
