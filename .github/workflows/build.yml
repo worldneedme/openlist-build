@@ -49,7 +49,7 @@ jobs:
           yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       # Gradle 由仓库内的 wrapper 提供，版本与 AGP 匹配（见 gradle-wrapper.properties）。
-      # 不再手动下载固定版本，避免「CI 的 Gradle 版本」和「本地/仓库声明的版本」两套事实。
+      # 不再手动下载固定版本，避免「CI 的 Gradle 版本」和「仓库声明的版本」两套事实。
       - name: Build debug APK
         run: |
           set -o pipefail
@@ -74,6 +74,34 @@ jobs:
             exit 1
           }
 
+      # P0-3：release 包。有 KEYSTORE_BASE64 时用固定签名，没有则回落 debug 签名，
+      # 保证 secret 未配置时也能出包做冒烟测试（签名指纹会变，仅用于测试）。
+      - name: Build release APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -o pipefail
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            export KEYSTORE_FILE="$RUNNER_TEMP/release.keystore"
+            echo "使用固定 release 签名"
+          else
+            echo "::warning title=NoKeystore::未配置 KEYSTORE_BASE64，release 包回落 debug 签名（仅供冒烟，不可分发）"
+          fi
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee /tmp/release.log || {
+            echo "::error title=ReleaseFailed::gradle assembleRelease failed"
+            grep -E "(error:|FAILURE:|FAILED|R8|Missing class|cannot find symbol)" /tmp/release.log | head -n 30 | while IFS= read -r line; do
+              echo "::error title=ReleaseError::$line"
+            done
+            exit 1
+          }
+          echo "--- 签名指纹 ---"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools/35.0.0" -name apksigner | head -n 1)
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/release/*.apk | grep -E "SHA-256|DN:" || true
+
       - name: Upload unit test report
         uses: actions/upload-artifact@v4
         if: failure()
@@ -89,3 +117,11 @@ jobs:
           name: openlist-downloader-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: openlist-downloader-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: ignore
