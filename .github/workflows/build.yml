@@ -46,20 +46,18 @@ jobs:
           mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
           export PATH="$SDK/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses >/dev/null
-          yes | sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Set up Gradle
-        run: |
-          curl -sL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /opt
-          echo "/opt/gradle-8.5/bin" >> "$GITHUB_PATH"
-
+      # Gradle 由仓库内的 wrapper 提供，版本与 AGP 匹配（见 gradle-wrapper.properties）。
+      # 不再手动下载固定版本，避免「CI 的 Gradle 版本」和「本地/仓库声明的版本」两套事实。
       - name: Build debug APK
         run: |
           set -o pipefail
-          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/assemble.log || {
+          chmod +x ./gradlew
+          ./gradlew --version
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/assemble.log || {
             echo "::error title=AssembleFailed::gradle assembleDebug failed"
-            grep -E "(error:|FAILURE:|FAILED|cannot find symbol|package .* does not exist)" /tmp/assemble.log | head -n 30 | while IFS= read -r line; do
+            grep -E "(error:|FAILURE:|FAILED|cannot find symbol|package .* does not exist|Unsupported class file)" /tmp/assemble.log | head -n 30 | while IFS= read -r line; do
               echo "::error title=CompileError::$line"
             done
             exit 1
@@ -68,7 +66,7 @@ jobs:
       - name: Run unit tests
         run: |
           set -o pipefail
-          gradle testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee /tmp/test.log || {
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee /tmp/test.log || {
             echo "::error title=TestFailed::gradle testDebugUnitTest failed"
             grep -E "(error:|FAILURE:|FAILED|AssertionError|Exception|expected:|but was:)" /tmp/test.log | head -n 40 | while IFS= read -r line; do
               echo "::error title=TestError::$line"
