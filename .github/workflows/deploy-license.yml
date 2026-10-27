@@ -1,0 +1,128 @@
+name: Deploy License Worker
+
+# 云匣 Pro 授权服务（Rust Worker + D1）的构建与部署。
+#
+# 源码在私有仓 worldneedme/openlist-license，这里用只读 deploy key 拉取，
+# 源码不会出现在这个 public 仓里。
+# 放在 public 仓跑是为了用免费的 Actions 分钟（私有仓受账号计费限制）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout private license source
+        uses: actions/checkout@v4
+        with:
+          repository: worldneedme/openlist-license
+          ref: main
+          ssh-key: ${{ secrets.LICENSE_READ_KEY }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain (wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo + worker-build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cargo-license-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-license-
+
+      - name: Ensure worker-build
+        run: |
+          if ! command -v worker-build >/dev/null 2>&1; then
+            cargo install -q worker-build
+          fi
+          worker-build --version || true
+
+      - name: Ensure wrangler
+        run: npm install -g wrangler@4
+
+      - name: Resolve D1 database (create if missing)
+        id: d1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CI: "true"
+        run: |
+          set -euo pipefail
+          ID="$(wrangler d1 list --json | jq -r '.[] | select(.name=="openlist-license") | .uuid' | head -1)"
+          if [ -z "${ID:-}" ] || [ "$ID" = "null" ]; then
+            echo "D1 database not found, creating..."
+            OUT="$(wrangler d1 create openlist-license --json)"
+            echo "$OUT"
+            ID="$(echo "$OUT" | jq -r '.uuid // .database_id // .result.uuid // .d1_databases[0].database_id // empty')"
+          fi
+          if [ -z "${ID:-}" ]; then
+            echo "::error title=D1Missing::无法获取 D1 database id"
+            exit 1
+          fi
+          echo "D1_ID=$ID"
+          sed -i "s/__D1_ID__/$ID/g" wrangler.toml
+          grep -n "database_id" wrangler.toml
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Apply D1 schema
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CI: "true"
+        run: wrangler d1 execute openlist-license --remote --file=./migrations/0001_init.sql
+
+      - name: Push worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_TOKEN: ${{ secrets.LICENSE_ADMIN_TOKEN }}
+          SIGNING_KEY: ${{ secrets.LICENSE_SIGNING_KEY }}
+        run: |
+          set -e
+          printf '%s' "$ADMIN_TOKEN" | wrangler secret put ADMIN_TOKEN
+          printf '%s' "$SIGNING_KEY" | wrangler secret put SIGNING_KEY
+
+      - name: Deploy worker
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -o pipefail
+          wrangler deploy 2>&1 | tee /tmp/deploy.log
+          URL="$(grep -oE 'https://[a-zA-Z0-9._-]+\.workers\.dev' /tmp/deploy.log | head -1 || true)"
+          echo "URL=$URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        run: |
+          set -e
+          URL="${{ steps.deploy.outputs.url }}"
+          if [ -z "$URL" ]; then
+            echo "::error title=NoUrl::部署日志里没解析到 workers.dev 地址"
+            exit 1
+          fi
+          echo "target: $URL"
+          for i in 1 2 3 4 5; do
+            if curl -fsS "$URL/health"; then
+              echo ""
+              echo "health OK"
+              exit 0
+            fi
+            echo "retry $i"
+            sleep 5
+          done
+          echo "::error title=HealthFailed::/health 未通过"
+          exit 1
