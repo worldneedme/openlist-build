@@ -45,9 +45,29 @@ jobs:
 
       - name: Ensure worker-build
         run: |
-          if ! command -v worker-build >/dev/null 2>&1; then
-            cargo install -q worker-build
-          fi
+          # crates.io 索引偶尔超时，带重试
+          for i in 1 2 3; do
+            if command -v worker-build >/dev/null 2>&1; then break; fi
+            echo "installing worker-build (attempt $i)"
+            cargo install worker-build --locked || cargo install worker-build || true
+            sleep 5
+          done
+          command -v worker-build >/dev/null 2>&1 || { echo "::error title=NoWorkerBuild::worker-build 安装失败"; exit 1; }
+          worker-build --version || true
+
+      - name: Warm cargo index (with retry)
+        run: |
+          # worker-build 内部会跑 `cargo metadata`，它要拉 crates.io 索引；
+          # 这一步提前预热 + 重试，避免构建中途超时。
+          export CARGO_NET_RETRY=10
+          export CARGO_HTTP_TIMEOUT=120
+          export CARGO_HTTP_MULTIPLEXING=false
+          for i in 1 2 3 4; do
+            echo "cargo fetch (attempt $i)"
+            if cargo fetch; then echo "index warm"; break; fi
+            sleep $((i * 10))
+          done
+          cargo metadata --format-version 1 > /dev/null && echo "metadata OK"
           worker-build --version || true
 
       - name: Ensure wrangler
@@ -107,10 +127,10 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # 关键：workers-rs 的 wasm 会 import WebAssembly.JSTag（exnref EH），
-          # 而 Workers 的 V8 未启用该提案 → 实例化失败 → 所有路由 1101。
-          # wasm-bindgen 0.2.122 changelog 给出的回退开关就是下面这条。
-          RUSTFLAGS: "-Cllvm-args=-wasm-use-legacy-eh"
+          # worker-build 里层的 `cargo metadata` 会继承这些，避免索引超时
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_TIMEOUT: "120"
+          CARGO_HTTP_MULTIPLEXING: "false"
         run: |
           set -o pipefail
           wrangler deploy 2>&1 | tee /tmp/deploy.log
