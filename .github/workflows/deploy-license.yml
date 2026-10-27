@@ -114,8 +114,10 @@ jobs:
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          set -e
           URL="${{ steps.deploy.outputs.url }}"
           if [ -z "$URL" ]; then
             echo "::error title=NoUrl::部署日志里没解析到 workers.dev 地址"
@@ -132,4 +134,10 @@ jobs:
             sleep 5
           done
           echo "::error title=HealthFailed::/health 未通过"
+          echo "=== 完整响应 ==="
+          curl -sS -i "$URL/health" || true
+          echo "=== 最近部署 ==="
+          curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/openlist-license/deployments" \
+            | head -c 1500 || true
           exit 1
