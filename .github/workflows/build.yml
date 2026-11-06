@@ -102,6 +102,44 @@ jobs:
           APKSIGNER=$(find "$ANDROID_HOME/build-tools/35.0.0" -name apksigner | head -n 1)
           "$APKSIGNER" verify --print-certs app/build/outputs/apk/release/*.apk | grep -E "SHA-256|DN:" || true
 
+      # Artifact 配额满时 APK 改走私有仓 apk 分支（可写 deploy key SOURCE_WRITE_KEY）。
+      # 单提交孤儿分支，每次 force push 覆盖，不累积历史。APK 存私有仓，保持不公开。
+      - name: Push APK to private repo (apk branch)
+        if: success()
+        env:
+          WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          set -e
+          STAGE=/tmp/apkstage
+          mkdir -p "$STAGE"
+          cp app/build/outputs/apk/debug/*.apk "$STAGE/app-debug.apk" 2>/dev/null || true
+          cp app/build/outputs/apk/release/*.apk "$STAGE/app-release.apk" 2>/dev/null || true
+          ls -la "$STAGE"
+          if [ ! -f "$STAGE/app-release.apk" ] && [ ! -f "$STAGE/app-debug.apk" ]; then
+            echo "::error title=ApkPushFailed::no APK files found"
+            exit 1
+          fi
+          SRC_SHA=$(git rev-parse --short HEAD)
+          printf 'run=%s\nref=%s\nsrc=%s\nbuilt=%s\n' \
+            "${{ github.run_id }}" "${{ inputs.source_ref }}" "$SRC_SHA" \
+            "$(date -u +%FT%TZ)" > "$STAGE/INFO.txt"
+          mkdir -p /tmp/apkssh
+          echo "$WRITE_KEY" > /tmp/apkssh/id_ed25519
+          chmod 600 /tmp/apkssh/id_ed25519
+          export GIT_SSH_COMMAND="ssh -i /tmp/apkssh/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/apkssh/known_hosts"
+          cd "$STAGE"
+          git init -q -b apk
+          git config user.name "ci-apk-bot"
+          git config user.email "ci-apk-bot@users.noreply.github.com"
+          git remote add origin git@github.com:worldneedme/openlist-downloader.git
+          git add -A
+          git commit -q -m "apk: run ${{ github.run_id }} ref ${{ inputs.source_ref }} @ $SRC_SHA"
+          git push -q -f origin apk || {
+            echo "::error title=ApkPushFailed::git push to private repo apk branch failed"
+            exit 1
+          }
+          echo "APK pushed to worldneedme/openlist-downloader branch apk (src=$SRC_SHA)"
+
       - name: Upload unit test report
         uses: actions/upload-artifact@v4
         if: failure()
